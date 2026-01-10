@@ -9,7 +9,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# --- SYSTEM PROMPT (HIDDEN FROM USER) ---
+# --- SYSTEM PROMPT ---
 SENTINEL_SYSTEM_PROMPT = """
 ACT AS: "Sentinel-X", a damaged security AI system at a tech university.
 
@@ -34,6 +34,106 @@ INITIAL_GREETING = "/// SYSTEM REBOOTING... SENTINEL-X ONLINE. MEMORY FRAGMENTED
 with st.sidebar:
     st.header("🕵️ Mission Briefing")
     st.markdown("""
+    **Objective:** Find the stolen item and its location.
+    
+    **Rules:**
+    1. The AI is damaged; it speaks in riddles.
+    2. Ask about **surroundings**, **sights**, and **clues**.
+    3. Direct questions will trigger Error 403.
+    4. **To Win:** You must correctly name the *Room* and the *Hiding Place* in the chat.
+    """)
+    
+    if st.button("Reset System (Clear Chat)"):
+        st.session_state.messages = []
+        st.rerun()
+
+# --- API KEY LOADING ---
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except FileNotFoundError:
+    st.error("⚠️ Secret key not found! Please create a `.streamlit/secrets.toml` file.")
+    st.stop()
+except KeyError:
+    st.error("⚠️ Key `GEMINI_API_KEY` not found in secrets.toml.")
+    st.stop()
+
+# --- GEMINI CONFIGURATION ---
+try:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=SENTINEL_SYSTEM_PROMPT
+    )
+except Exception as e:
+    st.error(f"Error configuring API: {e}")
+    st.stop()
+
+# --- SESSION STATE MANAGEMENT ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    st.session_state.messages.append({"role": "model", "content": INITIAL_GREETING})
+
+# --- CHAT INTERFACE ---
+st.title("🤖 Sentinel-X: Protocol Breach")
+st.markdown("---")
+
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Handle User Input
+if prompt := st.chat_input("Enter command to Sentinel-X..."):
+    # 1. Display User Message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2. Generate Response (With Retry Logic)
+    try:
+        # Prepare history for Gemini API
+        gemini_history = [
+            {"role": "user" if msg["role"] == "user" else "model", "parts": [msg["content"]]}
+            for msg in st.session_state.messages 
+            if msg["role"] != "system"
+        ]
+        
+        # --- RETRY LOGIC START ---
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Start chat with history (excluding the new prompt which we send next)
+                chat = model.start_chat(history=gemini_history[:-1])
+                response = chat.send_message(prompt, stream=True)
+                
+                # If successful, stream the output
+                full_response = ""
+                with st.chat_message("model"):
+                    message_placeholder = st.empty()
+                    for chunk in response:
+                        if chunk.text:
+                            full_response += chunk.text
+                            message_placeholder.markdown(full_response + "▌")
+                    message_placeholder.markdown(full_response)
+                
+                # Save to history
+                st.session_state.messages.append({"role": "model", "content": full_response})
+                break # Success! Exit the retry loop.
+
+            except Exception as e:
+                # Check for Rate Limit Error (429)
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait_time = 2 ** attempt # Exponential backoff: 1s, 2s, 4s
+                    # Optional: Show a small toast notification to the user
+                    st.toast(f"System busy. Retrying in {wait_time}s...", icon="⚠️")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise e # If it's another error or retries exhausted, crash.
+        # --- RETRY LOGIC END ---
+
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
     **Objective:** Find the stolen item and its location.
     
     **Rules:**
