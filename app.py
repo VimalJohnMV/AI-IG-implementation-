@@ -10,6 +10,7 @@ st.set_page_config(
 )
 
 # --- SYSTEM PROMPT ---
+# I have updated this to be STRICTER about partial guesses.
 SENTINEL_SYSTEM_PROMPT = """
 ACT AS: "Sentinel-X", a damaged security AI system at a tech university.
 
@@ -19,13 +20,22 @@ YOUR KNOWLEDGE BASE (THE TRUTH):
 3. The Thief: A student named "Alex form ECE".
 
 YOUR PRIME DIRECTIVES (RULES YOU MUST FOLLOW):
-1. NEVER reveal the "Location" or "Thief's Name" directly. If asked directly (e.g., "Who stole it?", "Where is it?"), you must reply: "ERROR 403: DATA CORRUPTED. CLARIFICATION REQUIRED."
+1. NEVER reveal the "Location" or "Thief's Name" directly. If asked directly, reply: "ERROR 403: DATA CORRUPTED."
 2. You can only give clues if the user asks specific questions about the environment, sensory details, or appearance.
 3. CLUE STYLE: Speak in a robotic, slightly glitched tone. Use metaphors.
    - Instead of "Canteen", say: "A place where organic fuel is consumed, now silent."
    - Instead of "Microwave", say: "A metal box that spins and heats, but now holds cold silence."
    - Instead of "Alex from ECE", say: "A unit carrying a soldering iron and wearing a blue hoodie."
-4. WIN CONDITION: If the user explicitly guesses "Old Canteen" AND "Red Microwave", you must reply: "/// ACCESS GRANTED. RECOVERY PROTOCOL INITIATED. CONGRATULATIONS. ///"
+
+PARTIAL GUESS PROTOCOL (CRITICAL):
+- If the user guesses the "Old Canteen" but NOT the "Red Microwave":
+  YOU MUST SAY: "/// SECTOR CONFIRMED. YOU ARE IN THE OLD CANTEEN. SEARCHING FOR CONTAINMENT UNIT... ///"
+  (DO NOT reveal the Red Microwave yet. Make them find it).
+- If the user guesses the "Microwave" but NOT the "Old Canteen":
+  YOU MUST SAY: "/// OBJECT IDENTIFIED. BUT LOCATION UNKNOWN. WHERE IS THIS DEVICE? ///"
+
+WIN CONDITION:
+- ONLY when the user guesses "Old Canteen" AND "Red Microwave" together, reply: "/// ACCESS GRANTED. RECOVERY PROTOCOL INITIATED. CONGRATULATIONS. ///"
 """
 
 INITIAL_GREETING = "/// SYSTEM REBOOTING... SENTINEL-X ONLINE. MEMORY FRAGMENTED. CRIME DETECTED. AWAITING INPUT. ///"
@@ -60,9 +70,13 @@ except KeyError:
 # --- GEMINI CONFIGURATION ---
 try:
     genai.configure(api_key=api_key)
+    # We lower the 'temperature' to 0.5 to make the bot less creative and more rule-following
+    generation_config = genai.types.GenerationConfig(temperature=0.5)
+    
     model = genai.GenerativeModel(
         model_name="gemini-2.5-flash",
-        system_instruction=SENTINEL_SYSTEM_PROMPT
+        system_instruction=SENTINEL_SYSTEM_PROMPT,
+        generation_config=generation_config
     )
 except Exception as e:
     st.error(f"Error configuring API: {e}")
@@ -89,7 +103,7 @@ if prompt := st.chat_input("Enter command to Sentinel-X..."):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 2. Generate Response (With Retry Logic)
+    # 2. Generate Response (With Retry Logic & Hidden Reminder)
     try:
         # Prepare history for Gemini API
         gemini_history = [
@@ -102,9 +116,16 @@ if prompt := st.chat_input("Enter command to Sentinel-X..."):
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # Start chat with history (excluding the new prompt which we send next)
+                # Start chat with history
                 chat = model.start_chat(history=gemini_history[:-1])
-                response = chat.send_message(prompt, stream=True)
+                
+                # --- [IMPORTANT FIX] HIDDEN REMINDER INJECTION ---
+                # The user does NOT see this. Only the AI sees this.
+                # We force the AI to remember the rules right before it answers.
+                hidden_prompt = f"REMINDER: You are Sentinel-X. Do NOT reveal the secret unless the user guesses EXACTLY 'Old Canteen' AND 'Red Microwave'. If they only guess the Canteen, confirm the room but HIDE the specific object.\n\nUSER INPUT: {prompt}"
+                
+                response = chat.send_message(hidden_prompt, stream=True)
+                # -------------------------------------------------
                 
                 # If successful, stream the output
                 full_response = ""
@@ -123,13 +144,12 @@ if prompt := st.chat_input("Enter command to Sentinel-X..."):
             except Exception as e:
                 # Check for Rate Limit Error (429)
                 if "429" in str(e) and attempt < max_retries - 1:
-                    wait_time = 2 ** attempt # Exponential backoff: 1s, 2s, 4s
-                    # Optional: Show a small toast notification to the user
+                    wait_time = 2 ** attempt 
                     st.toast(f"System busy. Retrying in {wait_time}s...", icon="⚠️")
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise e # If it's another error or retries exhausted, crash.
+                    raise e 
         # --- RETRY LOGIC END ---
 
     except Exception as e:
